@@ -1,0 +1,240 @@
+import yfinance as yf
+import streamlit as st
+import datetime as dt
+import pandas as pd
+import pandas_ta as ta
+import numpy as np
+import time
+from alpaca.trading.requests import MarketOrderRequest
+from alpaca.trading.enums import OrderSide, TimeInForce
+import alpaca_trade_api as tradeapi
+from secret_tokens import AlpacaPaper_KeyID, AlpacaPaper_SecretKey, BASE_URL
+from alpaca.trading.client import TradingClient
+from tradingview_ta import TradingView, TA_Handler, Interval, Exchange
+
+API_KEY = AlpacaPaper_KeyID
+SECRET_KEY = AlpacaPaper_SecretKey
+trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
+api = tradeapi.REST(key_id=AlpacaPaper_KeyID, secret_key=AlpacaPaper_SecretKey, base_url=BASE_URL, api_version='v2')
+
+def Full_Account_Check():
+    account = trading_client.get_account()
+    for property_name, value in account:
+        print(f"\"{property_name}\": {value}")
+
+picks = ['NFLX', 'TSLA', 'META', 'AAPL', 'MSFT', 'AMGN', 'INTC', 'NVDA', 'PEP', 'QCOM']
+shares = 10.0
+fast_calc = 12
+slow_calc = 26
+signal_calc = 8
+rsi_length = 14
+bb_period = 20
+
+def main():
+    stocks = picks
+    for stock in stocks:
+        Execute(stock)
+    
+def Buy_Shares(stock):
+    market_order_buy = MarketOrderRequest(
+                    symbol=stock,
+                    qty=shares,
+                    side=OrderSide.BUY,
+                    time_in_force=TimeInForce.GTC
+                    )
+    submitting_order = trading_client.submit_order(market_order_buy)
+
+def Sell_Shares(stock):
+    pos_qty = float(api.get_position(stock).qty)
+    market_order_sell = MarketOrderRequest(
+                    symbol=stock,
+                    qty=pos_qty,
+                    side=OrderSide.SELL,
+                    time_in_force=TimeInForce.GTC
+                    )
+    submitting_order = trading_client.submit_order(market_order_sell)
+
+def Get_Indicators(stock):
+    
+    MACD_ODT, SIGNAL_ODT = MACD_Calc(stock)
+    RSI_NOW, RSI_PREV = RSI_ta(stock)
+    UPPER_BB, LOWER_BB = Bollinger_Bands(stock)
+    account = Check_Account(stock)
+    current_price = Check_Price(stock)
+    
+    print(stock + ":")
+    print('RSI_PREV, RSI_NOW:')
+    print(RSI_PREV)
+    print(RSI_NOW)
+    print('MACD, SIGNAL:')
+    print(MACD_ODT)
+    print(SIGNAL_ODT)
+    print("UPPER BB, LOWER BB, CURRENT PRICE")
+    print(UPPER_BB)
+    print(LOWER_BB)
+    print(current_price)
+    
+    if (RSI_PREV <= 30 and RSI_NOW > RSI_PREV and LOWER_BB > current_price) \
+    or (MACD_ODT > SIGNAL_ODT and RSI_NOW <= 40) \
+    or (MACD_ODT > SIGNAL_ODT and LOWER_BB > current_price):
+        #BUY CHECK
+        if Check_Position(stock) == False:
+            print("BUY")
+        elif Check_Position(stock) == True:
+            if float(account.buying_power) > (current_price*shares):
+                print("BUY")
+            else:
+                pass
+        else:
+            pass
+
+    elif (RSI_PREV >= 75 and RSI_NOW < RSI_PREV and UPPER_BB < current_price) \
+    or (MACD_ODT < SIGNAL_ODT and RSI_NOW >= 65) \
+    or (MACD_ODT < SIGNAL_ODT and UPPER_BB < current_price):
+        #SELL CHECK
+        if Check_Position(stock) == True:
+            print("SELL")
+        elif Check_Position(stock) == False:
+            pass
+        else:
+            pass
+   
+    else:
+        print("INDICATORS NOT MET")
+   
+    return RSI_PREV, RSI_NOW, MACD_ODT, SIGNAL_ODT, UPPER_BB, LOWER_BB
+    
+def Execute(stock):
+    
+    RSI_PREV, RSI_NOW, MACD_ODT, SIGNAL_ODT, UPPER_BB, LOWER_BB = Get_Indicators(stock)
+    account = Check_Account(stock)
+    current_price = Check_Price(stock)
+    
+    if (RSI_PREV <= 30 and RSI_NOW > RSI_PREV and LOWER_BB > current_price) \
+    or (MACD_ODT > SIGNAL_ODT and RSI_NOW <= 40) \
+    or (MACD_ODT > SIGNAL_ODT and LOWER_BB > current_price):
+        #BUY
+        if Check_Position(stock) == False:
+            Buy_Shares(stock)
+        elif Check_Position(stock) == True:
+            if float(account.buying_power) > (current_price*shares):
+                Buy_Shares(stock)
+            else:
+                print("NOT ENOUGH FUNDS, HOLDING")
+        else:
+            pass
+    
+    elif (RSI_PREV >= 75 and RSI_NOW < RSI_PREV and UPPER_BB < current_price) \
+    or (MACD_ODT < SIGNAL_ODT and RSI_NOW >= 65) \
+    or (MACD_ODT < SIGNAL_ODT and UPPER_BB < current_price):
+        #SELL
+        if Check_Position(stock) == True:
+            Sell_Shares(stock)
+        elif Check_Position(stock) == False:
+            print("NO POSITION, CANNOT SELL")
+        else:
+            pass
+
+def MACD_Calc(stock):
+    macd = yf.Ticker(stock).history(period='5d')[['Close', 'Open', 'High', 'Volume', 'Low']]
+    
+    fsf = 2/(fast_calc+1)
+    ssf = 2/(slow_calc+1)
+    
+    macd['EMA_Fast'] = macd.Close.ewm(span = fast_calc).mean()*fsf
+    macd['EMA_Slow'] = macd.Close.ewm(span = slow_calc).mean()*ssf
+    macd['MACD'] = (macd.EMA_Fast) - (macd.EMA_Slow)
+    macd['SIGNAL'] = macd.MACD.ewm(span = signal_calc).mean()
+    
+    MACD_ODT = macd.MACD[-1:].values
+    SIGNAL_ODT = macd.SIGNAL[-1:].values
+    
+    return MACD_ODT, SIGNAL_ODT
+
+def RSI_Calc(stock):
+    rsi = yf.Ticker(stock).history(period='5d')[['Close']]
+    
+    rsi['Difference'] = rsi.diff(1)
+    
+    rsi['Gain'] = rsi['Difference'].clip(lower=0).round(2)
+    rsi['Loss'] = rsi['Difference'].clip(upper=0).abs().round(2)
+    
+    rsi['Avg_Gain'] = rsi['Gain'].rolling(window=rsi_length, min_periods=rsi_length).mean()[:rsi_length+1]
+    rsi['Avg_Loss'] = rsi['Loss'].rolling(window=rsi_length, min_periods=rsi_length).mean()[:rsi_length+1]
+
+#Average Gains
+    for i, row in enumerate(rsi['Avg_Gain'].iloc[rsi_length+1:]):
+        rsi['Avg_Gain'].iloc[i + rsi_length + 1] =\
+            (rsi['Avg_Gain'].iloc[i + rsi_length] *
+            (rsi_length - 1) +
+            rsi['Gain'].iloc[i + rsi_length + 1])\
+            / rsi_length
+# Average Losses
+    for i, row in enumerate(rsi['Avg_Loss'].iloc[rsi_length+1:]):
+        rsi['Avg_Loss'].iloc[i + rsi_length + 1] =\
+            (rsi['Avg_Loss'].iloc[i + rsi_length] *
+            (rsi_length - 1) +
+            rsi['Loss'].iloc[i + rsi_length + 1])\
+            / rsi_length
+
+    rsi['RS'] = rsi['Avg_Gain'] / rsi['Avg_Loss']
+    rsi['RSI'] = 100 - (100 / (1.0 + rsi['RS']))
+    
+    print(rsi)
+    
+def RSI_ta(stock):
+    rsi_now = TA_Handler(
+    symbol=stock,
+    screener="america",
+    exchange="NASDAQ",
+    interval=Interval.INTERVAL_1_MINUTE
+    )
+    
+    rsi_prev = TA_Handler(
+    symbol=stock,
+    screener="america",
+    exchange="NASDAQ",
+    interval=Interval.INTERVAL_5_MINUTES
+    )
+    
+    RSI_NOW = rsi_now.get_analysis().indicators["RSI"]
+    RSI_PREV = rsi_prev.get_analysis().indicators["RSI"]
+    
+    return RSI_NOW, RSI_PREV
+
+def Check_Position(stock): 
+    try:
+        pos_qty = float(api.get_position(stock).qty)
+        return True
+    except Exception as exception:
+        if exception.__str__() == 'position does not exist':
+            return False
+        else:
+            print('ERROR')
+
+def Check_Price(stock):
+    check = yf.Ticker('SPY').history(period='1d')[['Close']]
+    price = check.Close[-1:].values
+    
+    return price
+
+def Check_Account(stock):
+    check_acct = trading_client.get_account()
+
+    return check_acct
+
+def Bollinger_Bands(stock):
+    bb = yf.Ticker(stock).history(period='1y')[['Close']]
+    
+    bb['ma_20'] = bb['Close'].rolling(bb_period).mean()
+    bb['std'] = bb['Close'].rolling(bb_period).std()
+    
+    bb['upper_band'] = bb['ma_20'] + (2*bb['std'])
+    bb['lower_band'] = bb['ma_20'] - (2*bb['std'])
+    
+    upper_b = bb.upper_band[-1:].values
+    lower_b = bb.lower_band[-1:].values
+    
+    return upper_b, lower_b
+
+main()
